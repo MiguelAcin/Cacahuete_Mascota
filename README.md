@@ -1,6 +1,6 @@
 # Cacahuete Comando 🥜
 
-Mascota de escritorio para Windows: un cacahuete con bandana roja y un AK de juguete que patrulla tu escritorio, dispara, trepa por las ventanas, se vuelve loco y te recuerda beber agua. Le acompaña **Pipo**, un recluta pipa que hace de secretario (temporizador, pomodoro, recordatorios, notas e historial del portapapeles).
+Mascota de escritorio para Windows: un cacahuete con bandana roja y un AK de juguete que patrulla tu escritorio, dispara, trepa por las ventanas, se vuelve loco y te recuerda beber agua. Le acompaña **Pipo**, un recluta pipa que hace de secretario y de toca-narices (temporizador, pomodoro, recordatorios, notas e historial del portapapeles).
 
 No necesita instalar nada: está escrito en C# dentro de un script de PowerShell y se compila a un `.exe` en tu propio PC.
 
@@ -25,6 +25,7 @@ No necesita instalar nada: está escrito en C# dentro de un script de PowerShell
 - Notas rápidas (`notas.txt`).
 - Los 10 últimos textos copiados (solo en memoria).
 - Hora y batería.
+- **Modo toca-narices:** le mete puñetazos al cacahuete (que luego se venga a tiros), te roba el ratón y te lo arrastra un rato (das un tirón y lo suelta), escala por las ventanas, despierta al cacahuete y se burla de él. Se desactiva en Ajustes o con "Pórtate bien 1 hora", y nunca molesta durante un pomodoro, en modo concentración ni con algo a pantalla completa.
 
 **Además**
 - Funciona con varias pantallas y con gestores en mosaico como Hyprland4Win.

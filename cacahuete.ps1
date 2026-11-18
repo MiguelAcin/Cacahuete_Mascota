@@ -66,6 +66,7 @@ namespace Cacahuete
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
 
         // Pixeles reales en todas las pantallas aunque tengan distinta escala
@@ -648,7 +649,7 @@ namespace Cacahuete
         static readonly string[] WAIT = { "¡Mi sargento, baje de ahí!", "Yo le espero aquí abajo, ¿eh?", "¡Qué vértigo solo de mirarle!" };
         static readonly string[] EARS = { "¡Mis oídos!", "¿Hace falta tanto ruido?", "¡Avise antes, hombre!" };
 
-        enum BState { Follow, Flee, Fall, Drag, Sleep }
+        enum BState { Follow, Flee, Fall, Drag, Sleep, Approach, Punch, JumpGrab, Hang, ClimbWall, Mock }
 
         const int LW = 360, LH = 260;
         const float FX = 180f, FY = 240f;
@@ -666,7 +667,7 @@ namespace Cacahuete
 
         // ---- Pipo, el secretario ----
         ContextMenuStrip pmenu;
-        ToolStripMenuItem clipMenu, remMenu, stopTimerItem;
+        ToolStripMenuItem clipMenu, remMenu, stopTimerItem, behaveItem;
         float timerLeft = -1, timerTotal, alarmLeft, clipPoll, remPoll, hopTimer;
         string timerLabel = "";
         bool pomodoro, pomoWork; int pomoCount;
@@ -675,6 +676,141 @@ namespace Cacahuete
         class Reminder { public DateTime When; public string Text; }
         List<Reminder> reminders = new List<Reminder>();
         string Dir { get { return System.IO.Path.GetDirectoryName(AutoStart.ScriptPath); } }
+
+        // ---- Pipo, el toca-narices ----
+        static readonly string[] PUNCH_LINES = { "¡Toma castaña!", "¡Directo a la cáscara!", "¡Por todas las veces que me has gritado!", "¡Uno-dos!" };
+        static readonly string[] GRAB_LINES = { "¡Este ratón es mío!", "¡Me lo llevo de paseo!", "¡Wiiiiii!", "¿Buscabas algo?" };
+        static readonly string[] GRAB_END = { "¡JA JA! ¿Dónde estaba tu ratón?", "Toma, te lo devuelvo. Un poco usado.", "Ha sido un placer." };
+        static readonly string[] PULLED = { "¡Vale, vale, suelto!", "¡Qué brusquedad!", "¡Tienes la mano muy fuerte!" };
+        static readonly string[] MOCK_LINES = { "¡Nanana, no me pillas!", "¡Sargento cacahuete, sargento de juguete!", "¡Seco por fuera, seco por dentro!" };
+        static readonly string[] HIT_LINES = { "¡AU!", "¡Mi cáscara!", "¡Vale, me lo merecía!", "¡No a la cara!" };
+        static readonly string[] CLIMB_LINES = { "¡Al asalto de la ventana!", "Voy a ver qué hay ahí arriba.", "Escalada de élite." };
+        float trollTimer = 90f, hitCooldown, sleepPokeWait;
+        DateTime behaveUntil = DateTime.MinValue;
+        int punchDir; bool punched;
+        float grabT, grabDur, grabTX, grabTY, gx, gy; int grabSX, grabSY;
+        bool onWin; IntPtr winH; Native.RECT winRect; float winTime, winDur; int climbSide; float climbRot;
+
+        bool trollCfg = true, mouseCfg = true; float cfgTimer;
+        void RefreshCfg(float dt)
+        {
+            cfgTimer -= dt;
+            if (cfgTimer > 0) return;
+            cfgTimer = 2f;
+            trollCfg = Settings.Get("Troll", "1") != "0";
+            mouseCfg = Settings.Get("TrollMouse", "1") != "0";
+        }
+
+        bool TrollOK()
+        {
+            return trollCfg && DateTime.Now >= behaveUntil && !pet.PetCalm && !pet.PetHidden && !pomodoro && timerLeft <= 0 && alarmLeft <= 0;
+        }
+        bool MouseTrollOK() { return TrollOK() && mouseCfg && Control.MouseButtons == MouseButtons.None; }
+
+        public PointF Center { get { return new PointF(bx, by - 40 * pet.PetScale); } }
+
+        public bool HitTest(float x, float y)
+        {
+            if (st == BState.Drag || hitCooldown > 0) return false;
+            float S = pet.PetScale;
+            float dx = (x - bx) / (20 * S), dy = (y - (by - 40 * S)) / (40 * S);
+            return dx * dx + dy * dy < 1f;
+        }
+
+        public void Hit(int dir)
+        {
+            hitCooldown = 0.6f;
+            float S = pet.PetScale;
+            if (st == BState.Hang) ReleaseMouse();
+            onWin = false;
+            vx = dir * 260f * S; vy = -320f * S; st = BState.Fall; stateTime = 0;
+            Say(Pick(HIT_LINES), 1.6f);
+        }
+
+        void ReleaseMouse() { st = BState.Fall; stateTime = 0; vx = 0; vy = 0; }
+
+        // ---------------------------- travesuras ----------------------------
+        void PickTroll()
+        {
+            if (!TrollOK() || st != BState.Follow) return;
+            double r = rnd.NextDouble();
+            if (r < 0.35 && pet.PetOnGround && !pet.PetBusy) { st = BState.Approach; stateTime = 0; punched = false; }
+            else if (r < 0.65 && MouseTrollOK()) StartGrab();
+            else if (r < 0.85) TryClimb(Native.GetForegroundWindow(), true);
+            else if (pet.PetOnGround) { st = BState.Mock; stateTime = 0; Say(Pick(MOCK_LINES), 2.5f); }
+        }
+
+        void StartGrab()
+        {
+            float S = pet.PetScale;
+            Point c = Cursor.Position;
+            float ty = c.Y + 62 * S;                       // los pies quedan debajo de las manos
+            float g0 = Floors.At(c.X, c.Y, 20 * S).Bounds.Bottom - 2 * S;
+            if (ty > g0) ty = g0;
+            float T = 0.6f, grav = 1900f * S;
+            vx = (c.X - bx) / T;
+            vy = (ty - by) / T - 0.5f * grav * T;
+            if (Math.Abs(vx) > 2600 * S) return;            // demasiado lejos
+            onWin = false;
+            st = BState.JumpGrab; stateTime = 0; facing = c.X < bx ? -1 : 1;
+            Say("¡Ahí va ese ratón!", 1.5f);
+        }
+
+        void BeginHang()
+        {
+            float S = pet.PetScale;
+            Point c = Cursor.Position;
+            gx = c.X; gy = c.Y;
+            grabSX = c.X; grabSY = c.Y;
+            Rectangle sb = Screen.FromPoint(c).Bounds;
+            // destino: un sitio lejos dentro de la misma pantalla
+            for (int i = 0; i < 6; i++)
+            {
+                grabTX = sb.Left + 80 * S + (float)rnd.NextDouble() * (sb.Width - 160 * S);
+                grabTY = sb.Top + 80 * S + (float)rnd.NextDouble() * (sb.Height - 240 * S);
+                if (Math.Abs(grabTX - gx) + Math.Abs(grabTY - gy) > 400 * S) break;
+            }
+            grabT = 0; grabDur = 2.2f + (float)rnd.NextDouble() * 1.3f;
+            st = BState.Hang; stateTime = 0;
+            Say(Pick(GRAB_LINES), 2f);
+        }
+
+        bool ValidClimbTarget(IntPtr h, out Native.RECT r, out int side)
+        {
+            r = new Native.RECT(); side = 0;
+            float S = pet.PetScale;
+            if (h == IntPtr.Zero || h == Handle) return false;
+            if (!Native.IsWindowVisible(h) || Native.IsIconic(h)) return false;
+            string cls = Native.ClassOf(h);
+            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd") return false;
+            if (Native.TitleOf(h).StartsWith("Cacahuete")) return false;
+            if (!Native.GetWindowRect(h, out r)) return false;
+            Screen ws = Screen.FromHandle(h);
+            Rectangle sb = ws.Bounds;
+            if (r.Right - r.Left < 220 * S) return false;
+            if (r.Top < Math.Max(sb.Top, ws.WorkingArea.Top) + 60 * S || r.Top > sb.Bottom - 160 * S) return false;
+            bool leftOk = r.Left - sb.Left > 40 * S, rightOk = sb.Right - r.Right > 40 * S;
+            if (!leftOk && !rightOk) return false;
+            if (leftOk && rightOk) side = Math.Abs(bx - r.Left) < Math.Abs(bx - r.Right) ? -1 : 1;
+            else side = leftOk ? -1 : 1;
+            return true;
+        }
+
+        bool climbWalking;
+        void TryClimb(IntPtr h, bool talk)
+        {
+            Native.RECT r; int side;
+            if (!ValidClimbTarget(h, out r, out side)) return;
+            winH = h; winRect = r; climbSide = side; climbWalking = true;
+            st = BState.ClimbWall; stateTime = 0;
+            if (talk) Say(Pick(CLIMB_LINES), 2f);
+        }
+
+        float GroundAt(float S)
+        {
+            if (onWin && bx >= winRect.Left && bx <= winRect.Right) return winRect.Top;
+            return Floors.At(bx, by, 20 * S).Bounds.Bottom - 2 * S;
+        }
 
         public BuddyForm(PetForm p)
         {
@@ -729,11 +865,20 @@ namespace Cacahuete
             pmenu.Items.Add("¿Cómo va la batería?", null, delegate { SayBattery(); });
             pmenu.Items.Add("Cuéntame algo", null, delegate { Say(Pick(POKE), 3f); });
             pmenu.Items.Add(new ToolStripSeparator());
+            behaveItem = new ToolStripMenuItem("Pórtate bien 1 hora", null, delegate
+            {
+                if (DateTime.Now < behaveUntil) { behaveUntil = DateTime.MinValue; Say("¡Libertad! Jejeje...", 2f); }
+                else { behaveUntil = DateTime.Now.AddHours(1); Say("Vaaale. Seré un angelito una hora.", 2.5f); }
+            });
+            pmenu.Items.Add(behaveItem);
             pmenu.Items.Add("Menú del Cacahuete", null, delegate { pet.ShowMenu(); });
 
             pmenu.Opening += delegate
             {
                 stopTimerItem.Enabled = timerLeft > 0 || pomodoro;
+                bool good = DateTime.Now < behaveUntil;
+                behaveItem.Checked = good;
+                behaveItem.Text = good ? "Portándose bien (hasta las " + behaveUntil.ToString("HH:mm") + ")" : "Pórtate bien 1 hora";
                 stopTimerItem.Text = pomodoro ? "Parar pomodoro" : "Parar temporizador";
 
                 clipMenu.DropDownItems.Clear();
@@ -982,11 +1127,21 @@ namespace Cacahuete
             if (blinkLeft > 0) blinkLeft -= dt;
             squash = Math.Max(0, squash - dt * 5f);
 
-            Screen scr = Floors.At(bx, by, 20 * S);
-            float ground = scr.Bounds.Bottom - 2 * S;
+            if (hitCooldown > 0) hitCooldown -= dt;
+            RefreshCfg(dt);
+            // la ventana sobre la que esta se ha movido o cerrado
+            if (onWin && tick % 10 == 0)
+            {
+                Native.RECT wr;
+                bool ok = Native.IsWindowVisible(winH) && !Native.IsIconic(winH) && Native.GetWindowRect(winH, out wr) &&
+                          Math.Abs(wr.Top - winRect.Top) <= 3 && Math.Abs(wr.Left - winRect.Left) <= 3 && Math.Abs(wr.Right - winRect.Right) <= 3;
+                if (!ok) { onWin = false; if (st != BState.Drag && st != BState.Hang) { st = BState.Fall; stateTime = 0; Say("¡Eh! ¡Que me caigo!", 1.6f); } }
+            }
+            float ground = GroundAt(S);
             Rectangle vs = SystemInformation.VirtualScreen;
             PetState ps = pet.PetStateNow;
             walking = false;
+            climbRot = 0;
 
             switch (st)
             {
@@ -1006,12 +1161,132 @@ namespace Cacahuete
                     bx += vx * dt; by += vy * dt;
                     if (bx < vs.Left + 20 * S) { bx = vs.Left + 20 * S; vx = Math.Abs(vx) * 0.5f; }
                     if (bx > vs.Right - 20 * S) { bx = vs.Right - 20 * S; vx = -Math.Abs(vx) * 0.5f; }
-                    if (by >= ground)
+                    if (onWin && (bx < winRect.Left || bx > winRect.Right)) onWin = false;
+                    if (by >= ground && vy >= 0)
                     {
                         by = ground;
                         squash = Math.Min(1f, vy / (1200f * S));
                         if (vy > 900f * S) Say("¡Ay! ¡Que soy de cáscara fina!", 2f);
                         vx = 0; vy = 0; st = BState.Follow; stateTime = 0;
+                    }
+                    break;
+
+                case BState.JumpGrab:
+                    {
+                        vy += 1900f * S * dt;
+                        bx += vx * dt; by += vy * dt;
+                        Point c = Cursor.Position;
+                        float hx = bx, hy = by - 62 * S;     // manos
+                        float d = (float)Math.Sqrt((hx - c.X) * (hx - c.X) + (hy - c.Y) * (hy - c.Y));
+                        if (d < 45 * S && MouseTrollOK()) { BeginHang(); break; }
+                        if (stateTime > 0.75f || (by >= ground && vy > 0))
+                        {
+                            st = BState.Fall; stateTime = 0;
+                            if (d >= 45 * S) Say("¡Se ha movido! ¡Tramposo!", 1.8f);
+                        }
+                    }
+                    break;
+
+                case BState.Hang:
+                    {
+                        Point c = Cursor.Position;
+                        // si tiras del raton, se suelta
+                        if (Math.Abs(c.X - grabSX) + Math.Abs(c.Y - grabSY) > 40 * S || Control.MouseButtons != MouseButtons.None || pet.PetHidden)
+                        {
+                            ReleaseMouse(); Say(Pick(PULLED), 1.8f); break;
+                        }
+                        grabT += dt;
+                        float dx = grabTX - gx, dy = grabTY - gy;
+                        float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                        float sp = 380f * S * dt;
+                        if (dist > sp) { gx += dx / dist * sp; gy += dy / dist * sp; }
+                        gx += (float)Math.Sin(t * 9f) * 1.5f * S;
+                        grabSX = (int)gx; grabSY = (int)gy;
+                        Native.SetCursorPos(grabSX, grabSY);
+                        bx = gx; by = gy + 62 * S;
+                        facing = dx < 0 ? -1 : 1;
+                        walkPhase += dt * 14f;
+                        if (grabT >= grabDur || dist < 8 * S) { ReleaseMouse(); Say(Pick(GRAB_END), 2.5f); }
+                    }
+                    break;
+
+                case BState.Approach:
+                    {
+                        if (ground > by + 12 * S) { st = BState.Fall; stateTime = 0; break; }
+                        by = ground;
+                        if (!pet.PetOnGround || pet.PetBusy || stateTime > 12f || !TrollOK()) { st = BState.Follow; stateTime = 0; break; }
+                        punchDir = pet.PetX > bx ? 1 : -1;
+                        float tx = pet.PetX - punchDir * 42 * S;
+                        float dx = tx - bx;
+                        if (Math.Abs(dx) > 6 * S)
+                        {
+                            bx += Math.Sign(dx) * Math.Min(Math.Abs(dx), 230f * S * dt);
+                            facing = Math.Sign(dx) == 0 ? punchDir : Math.Sign(dx); walking = true; walkPhase += dt * 18f;
+                        }
+                        else { st = BState.Punch; stateTime = 0; facing = punchDir; punched = false; }
+                    }
+                    break;
+
+                case BState.Punch:
+                    by = ground;
+                    facing = punchDir;
+                    if (!punched && stateTime > 0.35f)
+                    {
+                        punched = true;
+                        if (Math.Abs(pet.PetX - bx) < 80 * S)
+                        {
+                            if (pet.PetStateNow == PetState.Sleep) { pet.PokeAwake(); Say("¡Arriba, dormilón!", 1.8f); }
+                            else { pet.Punched(punchDir); Say(Pick(PUNCH_LINES), 1.8f); }
+                        }
+                    }
+                    if (stateTime > 0.75f)
+                    {
+                        st = BState.Flee; stateTime = 0;   // y sale corriendo
+                    }
+                    break;
+
+                case BState.Mock:
+                    by = ground;
+                    facing = ((int)(stateTime * 4)) % 2 == 0 ? 1 : -1;
+                    walkPhase += dt * 20f;
+                    if (stateTime > 2.5f) { st = BState.Follow; stateTime = 0; }
+                    break;
+
+                case BState.ClimbWall:
+                    {
+                        float edge = climbSide < 0 ? winRect.Left : winRect.Right;
+                        if (climbWalking)
+                        {
+                            // anda hasta el pie de la ventana
+                            if (ground > by + 12 * S) { st = BState.Fall; stateTime = 0; break; }
+                            by = ground;
+                            float tx = edge + climbSide * 14 * S;
+                            float dx = tx - bx;
+                            if (Math.Abs(dx) > 5 * S)
+                            {
+                                bx += Math.Sign(dx) * Math.Min(Math.Abs(dx), 180f * S * dt);
+                                facing = Math.Sign(dx) == 0 ? 1 : Math.Sign(dx); walking = true; walkPhase += dt * 16f;
+                            }
+                            else climbWalking = false;
+                            if (stateTime > 15f) { st = BState.Follow; stateTime = 0; }
+                        }
+                        else
+                        {
+                            // trepa por el borde
+                            bx = edge + climbSide * 4 * S;
+                            by -= 110f * S * dt;
+                            facing = 1;
+                            climbRot = climbSide < 0 ? -90f : 90f;
+                            walking = true; walkPhase += dt * 14f;
+                            if (by <= winRect.Top + 4 * S)
+                            {
+                                onWin = true; by = winRect.Top;
+                                bx = edge - climbSide * 22 * S;
+                                winTime = 0; winDur = 15f + (float)rnd.NextDouble() * 20f;
+                                st = BState.Follow; stateTime = 0;
+                                Say("¡Cima conquistada!", 2f);
+                            }
+                        }
                     }
                     break;
 
@@ -1039,6 +1314,38 @@ namespace Cacahuete
                     {
                         if (ground > by + 12 * S) { st = BState.Fall; stateTime = 0; break; }
                         by = ground;
+                        // si el cacahuete se sube a una ventana, Pipo trepa detras
+                        if (!onWin && pet.PetOnWindow && ps != PetState.Fall && trollCfg)
+                        {
+                            TryClimb(pet.PetPlatHwnd, false);
+                            if (st == BState.ClimbWall) { Say("¡Espérame, sargento!", 2f); break; }
+                        }
+                        if (onWin)
+                        {
+                            winTime += dt;
+                            bool petHere = pet.PetOnWindow && pet.PetPlatHwnd == winH;
+                            if (winTime > winDur && !petHere)
+                            {
+                                int outDir = bx < (winRect.Left + winRect.Right) / 2f ? -1 : 1;
+                                onWin = false; vx = outDir * 220f * S; vy = -380f * S; st = BState.Fall; stateTime = 0;
+                                Say("¡Bombaaaa!", 1.6f);
+                                break;
+                            }
+                        }
+                        // le despierta si se duerme
+                        if (ps == PetState.Sleep && TrollOK() && Math.Abs(pet.PetX - bx) < 400 * S)
+                        {
+                            sleepPokeWait += dt;
+                            if (sleepPokeWait > 9f && rnd.NextDouble() < 0.4) { sleepPokeWait = 0; st = BState.Approach; stateTime = 0; punched = false; break; }
+                            if (sleepPokeWait > 9f) sleepPokeWait = 0;
+                        }
+                        trollTimer -= dt;
+                        if (trollTimer <= 0)
+                        {
+                            trollTimer = 60f + (float)rnd.NextDouble() * 120f;
+                            PickTroll();
+                            if (st != BState.Follow) break;
+                        }
                         if (ps == PetState.Crazy || ps == PetState.Dodge)
                         {
                             st = BState.Flee; stateTime = 0;
@@ -1049,12 +1356,17 @@ namespace Cacahuete
                             Say(Pick(EARS), 1.8f);
 
                         float tx = pet.PetOnGround ? pet.PetX - pet.PetFacing * 110 * S : pet.PetX;
+                        if (onWin)
+                        {
+                            if (!(pet.PetOnWindow && pet.PetPlatHwnd == winH)) tx = (winRect.Left + winRect.Right) / 2f + (float)Math.Sin(t * 0.3f) * (winRect.Right - winRect.Left) * 0.35f;
+                            tx = Math.Max(winRect.Left + 15 * S, Math.Min(winRect.Right - 15 * S, tx));
+                        }
                         float dx = tx - bx;
                         if (Math.Abs(dx) > 25 * S)
                         {
                             float speed = Math.Abs(dx) > 500 * S ? 250f : 100f;
                             int dir = dx < 0 ? -1 : 1;
-                            float g2 = Floors.At(bx + dir * 25 * S, by, 20 * S).Bounds.Bottom - 2 * S;
+                            float g2 = onWin ? by : Floors.At(bx + dir * 25 * S, by, 20 * S).Bounds.Bottom - 2 * S;
                             if (by - g2 > 12 * S)
                             {
                                 vx = dir * 220f * S; vy = -(float)Math.Sqrt(2 * 1900f * S * (by - g2 + 45 * S));
@@ -1089,7 +1401,7 @@ namespace Cacahuete
                 if (hopTimer <= 0) { hopTimer = 0.55f; vy = -520f * S; vx = 0; st = BState.Fall; stateTime = 0; }
             }
 
-            bool calm = !walking && st != BState.Fall && st != BState.Drag && squash <= 0 && alarmLeft <= 0;
+            bool calm = !walking && (st == BState.Follow || st == BState.Sleep) && squash <= 0 && alarmLeft <= 0;
             int every = timerLeft > 0 ? 8 : (Native.IdleMs() > 180000 ? 15 : 6);
             if (!calm || tick % every == 0 || speech != lastDrawn) Render(S);
         }
@@ -1103,8 +1415,10 @@ namespace Cacahuete
                 g.ScaleTransform(S, S);
                 GraphicsState gs = g.Save();
                 g.TranslateTransform(FX, FY);
+                if (climbRot != 0) g.RotateTransform(climbRot);
+                if (st == BState.Hang) { g.TranslateTransform(0, -62); g.RotateTransform((float)Math.Sin(t * 6f) * 10f); g.TranslateTransform(0, 62); }
                 if (facing < 0) g.ScaleTransform(-1, 1);
-                if (walking) g.RotateTransform(st == BState.Flee ? 10f : 4f);
+                if (walking && st != BState.ClimbWall && st != BState.Hang) g.RotateTransform(st == BState.Flee || st == BState.Approach ? 10f : 4f);
                 if (squash > 0) g.ScaleTransform(1f + 0.3f * squash, 1f - 0.3f * squash);
                 DrawPipo(g);
                 g.Restore(gs);
@@ -1121,8 +1435,8 @@ namespace Cacahuete
         void DrawPipo(Graphics g)
         {
             Color ink = C("#111111");
-            bool air = st == BState.Fall || st == BState.Drag;
-            bool scared = st == BState.Flee || air;
+            bool air = st == BState.Fall || st == BState.Drag || st == BState.JumpGrab || st == BState.Hang;
+            bool scared = st == BState.Flee || st == BState.Fall || st == BState.Drag;
             float bob = walking ? -Math.Abs((float)Math.Sin(walkPhase)) * 2.5f : (float)Math.Sin(t * 2.6f) * 0.8f;
             if (st == BState.Sleep) bob = (float)Math.Sin(t * 1.5f) * 0.8f;
 
@@ -1164,7 +1478,29 @@ namespace Cacahuete
             using (Pen arm = new Pen(ink, 2.5f))
             {
                 arm.StartCap = LineCap.Round; arm.EndCap = LineCap.Round;
-                if (scared)
+                if (st == BState.Hang || st == BState.JumpGrab)
+                {
+                    g.DrawLine(arm, -10, -36 + bob, -4, -62);
+                    g.DrawLine(arm, 10, -36 + bob, 4, -62);
+                    using (SolidBrush w2 = new SolidBrush(Color.White)) { g.FillEllipse(w2, -8, -66, 7, 7); g.FillEllipse(w2, 1, -66, 7, 7); }
+                }
+                else if (st == BState.Punch || st == BState.Approach || st == BState.Mock)
+                {
+                    float ext = 0;
+                    if (st == BState.Punch) ext = stateTime < 0.3f ? -0.6f * (stateTime / 0.3f) : (stateTime < 0.45f ? 1f : Math.Max(0, 1f - (stateTime - 0.45f) * 3f));
+                    float gxp = 16 + ext * 22, gyp = -33 + bob;
+                    g.DrawLine(arm, -12, -33 + bob, -16, -40 + bob);
+                    g.DrawLine(arm, 12, -33 + bob, gxp, gyp);
+                    using (SolidBrush glove = new SolidBrush(C("#D32F2F")))
+                    using (Pen go = new Pen(ink, 1.2f))
+                    {
+                        g.FillEllipse(glove, gxp - 5, gyp - 5, 11, 10); g.DrawEllipse(go, gxp - 5, gyp - 5, 11, 10);
+                        g.FillEllipse(glove, -21, -46 + bob, 10, 9); g.DrawEllipse(go, -21, -46 + bob, 10, 9);
+                    }
+                    if (st == BState.Mock)
+                        using (SolidBrush tongue = new SolidBrush(C("#E57373"))) g.FillEllipse(tongue, 2, -36 + bob, 5, 6);
+                }
+                else if (scared)
                 {
                     float wv = (float)Math.Sin(t * 20f) * 3f;
                     g.DrawLine(arm, -12, -34 + bob, -20, -50 + bob + wv);
@@ -1339,7 +1675,7 @@ namespace Cacahuete
                 Point c = Cursor.Position;
                 if (Math.Abs(c.X - downX) + Math.Abs(c.Y - downY) > 6)
                 {
-                    dragging = true; st = BState.Drag; stateTime = 0; vx = 0; vy = 0;
+                    dragging = true; st = BState.Drag; stateTime = 0; vx = 0; vy = 0; onWin = false;
                     offX = downX - bx; offY = downY - by;
                     Say("¡Socorro! ¡Me abducen!", 2f);
                 }
@@ -1417,7 +1753,9 @@ namespace Cacahuete
             auto.CheckedChanged += delegate { AutoStart.Set(auto.Checked); };
             gen.Controls.Add(auto);
             y += 34;
-            Chk(gen, "Pipo, el recluta pipa (compañero)", y, "Buddy", true); y += 34;
+            Chk(gen, "Pipo, el recluta pipa (compañero)", y, "Buddy", true); y += 30;
+            Chk(gen, "Pipo toca-narices (pega, trepa y molesta)", y, "Troll", true); y += 30;
+            Chk(gen, "Pipo puede robarte el ratón", y, "TrollMouse", true); y += 34;
             Chk(gen, "Gráficos realistas (imágenes de la carpeta sprites)", y, "Sprites", false); y += 44;
             Note(gen, "El Cacahuete se actualiza solo cuando cambia cacahuete.ps1.", y);
 
@@ -1761,6 +2099,31 @@ namespace Cacahuete
         public bool PetCalm { get { return Calm(); } }
         public bool PetSoundOn { get { return SoundOK(); } }
         public void ShowMenu() { lastInteraction = t; menu.Show(Cursor.Position); }
+        public bool PetOnWindow { get { return surf == Surf.WindowTop; } }
+        public IntPtr PetPlatHwnd { get { return platHwnd; } }
+        public bool PetBusy { get { return !CanAct(); } }
+
+        static readonly string[] PUNCHED_LINES = { "¡AY! ¡PIPO!", "¡¿ME HAS PEGADO?!", "¡Traición en las filas!", "¡Eso es insubordinación, recluta!" };
+        float revengeIn;
+
+        // Pipo le ha pegado un punetazo
+        public void Punched(int dir)
+        {
+            if (state == PetState.Sleep) state = PetState.Idle;
+            if (!CanAct() || surf != Surf.Ground || orient != Orient.Floor) return;
+            BeginFall(dir * 380f * S, -430f * S);
+            SayAlways(Pick(PUNCHED_LINES), 2f);
+            anger += 0.8f;
+            revengeIn = 1.4f + Rand(0f, 0.8f);
+        }
+
+        // Pipo le despierta dandole golpecitos
+        public void PokeAwake()
+        {
+            if (state != PetState.Sleep) return;
+            WakeUp();
+            SayAlways("¡PIPO! ¡Estaba durmiendo!", 2.2f);
+        }
 
         public void OpenSettings()
         {
@@ -2408,6 +2771,16 @@ namespace Cacahuete
         void Step(float dt)
         {
             stateTime += dt;
+            if (revengeIn > 0)
+            {
+                revengeIn -= dt;
+                if (revengeIn <= 0 && buddy != null && (state == PetState.Idle || state == PetState.Walk) && surf == Surf.Ground && !Calm())
+                {
+                    PointF bp = buddy.Center;
+                    StartBurstAt(true, bp);
+                    SayAlways("¡TE VAS A ENTERAR, PIPO!", 2f);
+                }
+            }
             squash = Math.Max(0, squash - dt * 5f);
             float leanTarget = 0;
             if (state == PetState.Walk) leanTarget = goal == Goal.Travel ? 7f : 4f;
@@ -2915,6 +3288,7 @@ namespace Cacahuete
                     DodgeOver(cur.X, cur.Y);
                     continue;
                 }
+                if (!b.Game && buddy != null && buddy.HitTest(b.X, b.Y)) { buddy.Hit(b.VX > 0 ? 1 : -1); bullets.RemoveAt(i); continue; }
                 if (b.StopDist > 0 && b.Dist >= b.StopDist) { AddHole(b.X, b.Y); bullets.RemoveAt(i); continue; }
                 if (!area.Contains((int)b.X, (int)b.Y)) bullets.RemoveAt(i);
             }
