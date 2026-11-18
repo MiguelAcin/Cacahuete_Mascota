@@ -1,0 +1,10 @@
+# Se genera al montar (Montar cacahuete.bat)
+Cacahuete.exe
+
+# Archivos personales que crea el cacahuete al usarlo
+cacahuete-log.txt
+notas.txt
+recordatorios.txt
+
+# Imagenes originales sin recortar
+sprites/*.webp
